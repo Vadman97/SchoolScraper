@@ -37,12 +37,13 @@ class Agency:
 
 
 SUBJECTS = [
-    Subject(label="California School Dashboard", value="CaDshbrd"),
-    Subject(label="Dashboard Additional Reports and Data", value="CaModel"),
-    Subject(label="CAASPP Test Results", value="CAASPP"),
-    Subject(
-        label="English Language Proficiency Assessments for CA (ELPAC)", value="ELPAC"
-    ),
+    # TODO(vkorolik) needs unique support
+    # Subject(label="California School Dashboard", value="CaDshbrd"),
+    # TODO(vkorolik) needs unique support
+    # Subject(label="Dashboard Additional Reports and Data", value="CaModel"),
+    # TODO(vkorolik) needs unique support
+    # Subject(label="CAASPP Test Results", value="CAASPP"),
+    # Subject(label="English Language Proficiency Assessments for CA (ELPAC)", value="ELPAC"),
     Subject(label="Physical Fitness Test (PFT)", value="FitTest"),
     Subject(label="Annual Enrollment Data", value="Enrollment"),
     Subject(label="English Learner Data", value="LC"),
@@ -83,6 +84,32 @@ class DataRow(dict):
     pass
 
 
+class YearParser(HTMLParser):
+    start: int
+    end: int
+
+    def __init__(self):
+        super().__init__()
+        self.data: str | None = None
+        self.type: str | None = None
+        self.start = 9999
+        self.end = 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag == 'select':
+            for attr in attrs:
+                if attr[0] == 'name':
+                    self.type = attr[1]
+        elif tag == 'option' and self.type == 'rYear':
+            for attr in attrs:
+                if attr[0] == 'value':
+                    self.start = min(self.start, int(attr[1].split('-')[0]))
+                    self.end = max(self.end, self.start + 1)
+
+    def handle_data(self, data):
+        self.data = data
+
+
 class DataParser(HTMLParser):
     def __init__(self):
         super().__init__()
@@ -118,22 +145,25 @@ class DataParser(HTMLParser):
         self.data = data
 
 
-def scrape(agency: Agency, level: Level, subject: Subject, report: Report):
+def scrape(query: str, level: Level, subject: Subject):
+    # gives allowed years for this level and subject
     r = requests.get(
         f"https://dq.cde.ca.gov/dataquest/page2.asp",
         params={"level": level.value, "subject": subject.value, "submit1": "Submit"},
     )
-    # TODO(vkorolik) gives allowed years for this level and subject
     assert r.ok
 
-    for year_start in range(2017, 2022):
+    year_parser = YearParser()
+    year_parser.feed(r.text)
+
+    for year_start in range(year_parser.start, year_parser.end):
         year_end2_digit = year_start - 1999
         r = requests.get(
             f"https://dq.cde.ca.gov/dataquest/SearchName.asp",
             params={
                 "rbTimeFrame": "oneyear",
                 "rYear": f"{year_start}-{year_end2_digit}",
-                "cName": agency.search,
+                "cName": query,
                 "Topic": subject.value,
                 "Level": level.value,
                 "submit1": "Submit",
@@ -142,37 +172,40 @@ def scrape(agency: Agency, level: Level, subject: Subject, report: Report):
         # TODO(vkorolik) gives report and agency options
         assert r.ok
 
-        # gives the actual data page, from which we extract the data table
-        r = requests.get(
-            f"https://dq.cde.ca.gov/dataquest/SchGrad.asp",
-            params={
-                "cSelect": agency.value,
-                "cChoice": report.value,
-                "cYear": f"{year_start}-{year_end2_digit}",
-                "cLevel": "School",
-                "cTopic": subject.value,
-                "myTimeFrame": "S",
-                "submit1": "Submit",
-            },
-        )
-        assert r.ok
-
-        parser = DataParser()
-        parser.feed(r.text)
-        print(parser.rows)
-
-
-def main():
-    scrape(
-        Agency(
+        data = collect_data(Agency(
             search="North High",
             name="North^High--Torrance^Unifie--1965060-1936277",
             value="North High&nbsp;--&nbsp;Torrance Unifie&nbsp;--&nbsp;1965060-1936277",
-        ),
-        Level.SCHOOL,
-        SUBJECTS[10],
-        REPORTS[0],
+        ), subject, REPORTS[0], year_start)
+        print(data)
+
+
+def collect_data(agency: Agency, subject: Subject, report: Report, year_start: int) -> list[DataRow]:
+    year_end2_digit = year_start - 1999
+
+    # gives the actual data page, from which we extract the data table
+    r = requests.get(
+        f"https://dq.cde.ca.gov/dataquest/SchGrad.asp",
+        params={
+            "cSelect": agency.value,
+            "cChoice": report.value,
+            "cYear": f"{year_start}-{year_end2_digit}",
+            "cLevel": "School",
+            "cTopic": subject.value,
+            "myTimeFrame": "S",
+            "submit1": "Submit",
+        },
     )
+    assert r.ok
+
+    parser = DataParser()
+    parser.feed(r.text)
+    return parser.rows
+
+
+def main():
+    for subject in SUBJECTS:
+        scrape('Coachella Valley', Level.SCHOOL, subject)
 
 
 if __name__ == "__main__":
