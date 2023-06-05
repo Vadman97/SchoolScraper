@@ -44,8 +44,10 @@ SUBJECTS = [
     # TODO(vkorolik) needs unique support
     # Subject(label="CAASPP Test Results", value="CAASPP"),
     # Subject(label="English Language Proficiency Assessments for CA (ELPAC)", value="ELPAC"),
-    Subject(label="Physical Fitness Test (PFT)", value="FitTest"),
-    Subject(label="Annual Enrollment Data", value="Enrollment"),
+    # TODO(vkorolik) needs unique support
+    # Subject(label="Physical Fitness Test (PFT)", value="FitTest"),
+    # TODO(vkorolik) needs unique support
+    # Subject(label="Annual Enrollment Data", value="Enrollment"),
     Subject(label="English Learner Data", value="LC"),
     Subject(label="Foster Student Data", value="Foster"),
     Subject(label="Special Education Data", value="SpecEd"),
@@ -84,30 +86,95 @@ class DataRow(dict):
     pass
 
 
-class YearParser(HTMLParser):
+class OptionParser(HTMLParser):
+    def __init__(self, expected_type: str):
+        super().__init__()
+        self.data: str | None = None
+        self.type: str | None = None
+        self.expected_type = expected_type
+
+    def handle_option(self, attrs: list[tuple[str, str | None]]):
+        raise NotImplemented
+
+    def handle_end_option(self):
+        pass
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "select":
+            for attr in attrs:
+                if attr[0] == "name":
+                    self.type = attr[1]
+        elif tag == "option" and self.type == self.expected_type:
+            self.handle_option(attrs)
+
+    def handle_endtag(self, tag):
+        if tag == "option" and self.type == self.expected_type:
+            self.handle_end_option()
+
+    def handle_data(self, data):
+        self.data = data
+
+
+class YearParser(OptionParser):
     start: int
     end: int
 
     def __init__(self):
-        super().__init__()
-        self.data: str | None = None
-        self.type: str | None = None
+        super().__init__("rYear")
         self.start = 9999
         self.end = 0
 
+    def handle_option(self, attrs):
+        for attr in attrs:
+            if attr[0] == "value":
+                self.start = min(self.start, int(attr[1].split("-")[0]))
+                self.end = max(self.end, self.start + 1)
+
+
+class AgencyParser(OptionParser):
+    agency: Agency
+
+    def __init__(self):
+        super().__init__("cSelect")
+        self.agency = Agency(name="", value="", search="")
+
+    def handle_option(self, attrs):
+        for attr in attrs:
+            if attr[0] == "value":
+                self.agency.value = attr[1]
+
+    def handle_end_option(self):
+        self.agency.name = self.data
+
+
+class ReportParser(HTMLParser):
+    reports: list[Report]
+    current_report: Report | None
+
+    def __init__(self):
+        super().__init__()
+        self.data: str | None = None
+        self.reports: list[Report] = []
+        self.current_report = Report(name="", value="")
+
     def handle_starttag(self, tag, attrs):
-        if tag == 'select':
+        if tag == "input":
+            value = ""
             for attr in attrs:
-                if attr[0] == 'name':
-                    self.type = attr[1]
-        elif tag == 'option' and self.type == 'rYear':
-            for attr in attrs:
-                if attr[0] == 'value':
-                    self.start = min(self.start, int(attr[1].split('-')[0]))
-                    self.end = max(self.end, self.start + 1)
+                if attr[0] == "name" and attr[1] == "cChoice":
+                    self.current_report = Report(name="", value="")
+                elif attr[0] == "value":
+                    value = attr[1]
+            if self.current_report:
+                self.current_report.value = value
+                self.reports.append(self.current_report)
 
     def handle_data(self, data):
-        self.data = data
+        if data.strip():
+            self.data = data.strip()
+            if self.current_report:
+                self.current_report.name = self.data
+                self.current_report = None
 
 
 class DataParser(HTMLParser):
@@ -158,6 +225,7 @@ def scrape(query: str, level: Level, subject: Subject):
 
     for year_start in range(year_parser.start, year_parser.end):
         year_end2_digit = year_start - 1999
+        # gives report and agency options
         r = requests.get(
             f"https://dq.cde.ca.gov/dataquest/SearchName.asp",
             params={
@@ -169,18 +237,26 @@ def scrape(query: str, level: Level, subject: Subject):
                 "submit1": "Submit",
             },
         )
-        # TODO(vkorolik) gives report and agency options
         assert r.ok
 
-        data = collect_data(Agency(
-            search="North High",
-            name="North^High--Torrance^Unifie--1965060-1936277",
-            value="North High&nbsp;--&nbsp;Torrance Unifie&nbsp;--&nbsp;1965060-1936277",
-        ), subject, REPORTS[0], year_start)
-        print(data)
+        agency_parser = AgencyParser()
+        agency_parser.feed(r.text)
+        agency_parser.agency.search = query
+
+        report_parser = ReportParser()
+        report_parser.feed(r.text)
+
+        for report in report_parser.reports:
+            data = collect_data(agency_parser.agency, subject, report, year_start)
+            print(
+                f"report for {year_start} {agency_parser.agency.name} {report.name}",
+                data,
+            )
 
 
-def collect_data(agency: Agency, subject: Subject, report: Report, year_start: int) -> list[DataRow]:
+def collect_data(
+    agency: Agency, subject: Subject, report: Report, year_start: int
+) -> list[DataRow]:
     year_end2_digit = year_start - 1999
 
     # gives the actual data page, from which we extract the data table
@@ -205,7 +281,7 @@ def collect_data(agency: Agency, subject: Subject, report: Report, year_start: i
 
 def main():
     for subject in SUBJECTS:
-        scrape('Coachella Valley', Level.SCHOOL, subject)
+        scrape("Coachella Valley", Level.SCHOOL, subject)
 
 
 if __name__ == "__main__":
